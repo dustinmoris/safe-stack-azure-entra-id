@@ -3,6 +3,7 @@ module Server
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Authentication
+open Microsoft.AspNetCore.Authentication.Cookies
 open Microsoft.AspNetCore.Authentication.OpenIdConnect
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
@@ -57,10 +58,13 @@ let signIn : HttpHandler =
 let requiresAuth =
     requiresAuthentication signIn
 
+let unauthorized =
+    setStatusCode 401 >=> json {| Message = "Unauthorized" |}
+
 let webApp =
     choose [
         route "/" >=> requiresAuth >=> text "hello world"
-        routeStartsWith "/api" >=> remotingApi
+        routeStartsWith "/api" >=> requiresAuthentication unauthorized >=> remotingApi
     ]
 
 let registerMiddleware (appBuilder : IApplicationBuilder) =
@@ -72,7 +76,7 @@ let registerServices (services : IServiceCollection) =
     let sp = services.BuildServiceProvider()
     let config = sp.GetService<IConfiguration>()
     services
-        .AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
+        .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
         .AddMicrosoftIdentityWebApp(config)
         .Services
         .AddAuthorization()
