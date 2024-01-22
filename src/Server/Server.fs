@@ -1,5 +1,6 @@
 module Server
 
+open System
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Authentication
@@ -10,11 +11,28 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Configuration
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Identity.Web
-open Saturn
 open Giraffe
-open Giraffe.Auth
-
 open Shared
+
+type RequiresAuthMiddleware(next: RequestDelegate) =
+    member this.Invoke (ctx: HttpContext) =
+        task {
+            let isAuthenticated =
+                isNotNull ctx.User
+                && ctx.User.Identity.IsAuthenticated
+
+            let isRoot =
+                ctx.Request.Path.Value.Equals "/"
+                || ctx.Request.Path.Value.Equals "/index.html"
+
+            match isAuthenticated, isRoot with
+            | true, _ -> do! next.Invoke(ctx)
+            | false, true ->
+                do! ctx.ChallengeAsync(OpenIdConnectDefaults.AuthenticationScheme)
+            | false, false ->
+                ctx.SetStatusCode(401)
+                do! ctx.Response.WriteAsJsonAsync {| Message = "Unauthenticated" |}
+        }
 
 module Storage =
     let todos = ResizeArray()
@@ -48,29 +66,19 @@ let remotingApi =
     |> Remoting.fromValue todosApi
     |> Remoting.buildHttpHandler
 
-let signIn : HttpHandler =
-    fun (next : HttpFunc) (ctx : HttpContext) ->
-        task {
-            do! ctx.ChallengeAsync(OpenIdConnectDefaults.AuthenticationScheme)
-            return! next ctx
-        }
-
-let requiresAuth =
-    requiresAuthentication signIn
-
-let unauthorized =
-    setStatusCode 401 >=> json {| Message = "Unauthorized" |}
-
 let webApp =
     choose [
-        route "/" >=> requiresAuth >=> text "hello world"
-        routeStartsWith "/api" >=> requiresAuthentication unauthorized >=> remotingApi
+        routeStartsWith "/api" >=> remotingApi
     ]
 
 let registerMiddleware (appBuilder : IApplicationBuilder) =
     appBuilder
         .UseAuthentication()
         .UseAuthorization()
+        .UseMiddleware<RequiresAuthMiddleware>()
+        .UseDefaultFiles()
+        .UseStaticFiles()
+        .UseGiraffe(webApp)
 
 let registerServices (services : IServiceCollection) =
     let sp = services.BuildServiceProvider()
@@ -80,17 +88,27 @@ let registerServices (services : IServiceCollection) =
         .AddMicrosoftIdentityWebApp(config)
         .Services
         .AddAuthorization()
+        .AddDistributedMemoryCache()
+        .AddSession()
+    |> ignore
 
-let app = application {
-    app_config registerMiddleware
-    service_config registerServices
-    use_router webApp
-    memory_cache
-    use_static "public"
-    use_gzip
-}
+// let app = application {
+//     app_config registerMiddleware
+//     service_config registerServices
+//     use_router webApp
+// }
 
 [<EntryPoint>]
-let main _ =
-    run app
+let main args =
+    let builder = WebApplication.CreateBuilder(
+        WebApplicationOptions(
+            Args = args,
+            WebRootPath = "public"))
+    // let builder = WebApplication.CreateBuilder()
+    registerServices builder.Services
+
+    let app = builder.Build()
+    registerMiddleware app
+
+    app.Run()
     0
